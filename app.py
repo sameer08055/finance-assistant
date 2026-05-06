@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import uuid
+import tempfile
 from dotenv import load_dotenv
 
 from utils.pdf_loader import load_pdf_pages, combine_pages
@@ -61,9 +62,10 @@ if run_btn:
         st.sidebar.error("Please upload a PDF first.")
     else:
         with st.spinner("Processing statement..."):
-            tmp_path = f"/tmp/{uploaded_file.name}"
-            with open(tmp_path, "wb") as f:
-                f.write(uploaded_file.read())
+            # Cloud-safe temp file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
 
             pages    = load_pdf_pages(tmp_path)
             raw_text = combine_pages(pages)
