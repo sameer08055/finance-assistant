@@ -1,0 +1,33 @@
+# Core
+langchain==0.3.25
+langchain-community==0.3.23
+langchain-groq==0.3.2
+langgraph==0.4.3
+langsmith==0.3.45
+
+# LLM / Embeddings
+groq
+sentence-transformers==3.4.1
+faiss-cpu==1.10.0
+
+# PDF
+pdfplumber==0.11.4
+
+# PII
+presidio-analyzer==2.2.356
+presidio-anonymizer==2.2.356
+spacy==3.8.4
+
+# Database
+sqlalchemy==2.0.41
+
+# Visualization
+plotly==6.0.1
+
+# UI
+streamlit==1.45.1
+
+# Utilities
+pandas==2.2.3
+python-dotenv==1.1.0
+pydantic==2.11.4
