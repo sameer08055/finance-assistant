@@ -8,7 +8,7 @@ langsmith==0.3.45
 # LLM / Embeddings
 groq
 sentence-transformers==3.4.1
-faiss-cpu==1.10.0
+faiss-cpu>=1.7.4
 
 # PDF
 pdfplumber==0.11.4
