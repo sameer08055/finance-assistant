@@ -4,6 +4,33 @@ import uuid
 import tempfile
 from dotenv import load_dotenv
 
+
+# ── Correction helpers ────────────────────────────────────────────────────────
+def _build_correction_map(verification_report: dict) -> dict:
+    """Return {(description, date): correction_detail} from verification_report."""
+    corr_map = {}
+    for c in verification_report.get("corrections", []):
+        key = (c.get("description", ""), str(c.get("date", ""))[:10])
+        corr_map[key] = c
+    return corr_map
+
+
+def _humanize_reason(reason: str) -> str:
+    r = reason.lower()
+    if "balance inconsistency" in r:
+        return "Sequential balance inconsistency"
+    if "invalid date" in r:
+        return "Invalid date format"
+    if "invalid amount" in r:
+        return "Invalid amount value"
+    if "empty" in r and "description" in r:
+        return "Missing description"
+    if "invalid balance" in r:
+        return "Invalid balance value"
+    if "invalid type" in r:
+        return "Invalid transaction type"
+    return reason.split(";")[0].strip().capitalize()
+
 from utils.pdf_loader import load_pdf_pages, combine_pages
 from graph import run_pipeline, run_followup
 from nodes.analyzer import (
@@ -55,6 +82,39 @@ with st.sidebar:
         for key in ["thread_id", "pipeline_ran", "chat_history", "result"]:
             del st.session_state[key]
         st.rerun()
+
+    # ── Pipeline Health card (only after a run) ───────────────────────────────
+    if st.session_state.pipeline_ran and st.session_state.result:
+        vr          = st.session_state.result.get("verification_report", {})
+        n_txns      = len(st.session_state.result.get("transactions", []))
+        n_verified  = sum(
+            1 for t in st.session_state.result.get("transactions", [])
+            if t.get("verified")
+        )
+        n_correct   = vr.get("corrections_made", 0)
+        corrections = vr.get("corrections", [])
+
+        st.markdown("---")
+        st.markdown("**Pipeline Health**")
+
+        st.markdown(f"✓ Transactions verified: **{n_verified}/{n_txns}**")
+
+        if n_correct == 0:
+            st.success("✓ No corrections needed")
+        else:
+            st.warning(f"⚠ Auto-corrections made: **{n_correct}**")
+            last = corrections[-1] if corrections else None
+            if last and last.get("fields"):
+                f      = last["fields"][0]
+                field  = f["field"]
+                orig   = f["original_value"]
+                fixed  = f["corrected_value"]
+                reason = _humanize_reason(last.get("reason", ""))
+                st.markdown(
+                    f"Last correction:  \n"
+                    f"`{field}` &nbsp; `{orig}` → `{fixed}`  \n"
+                    f"*{reason}*"
+                )
 
 # ── Run pipeline ──────────────────────────────────────────────────────────────
 if run_btn:
@@ -162,12 +222,34 @@ with tab3:
         st.plotly_chart(fig_anomaly, use_container_width=True)
 
         for a in anomalies:
+            is_rolling = a.get("method") == "rolling_z_score"
+
+            # ── Prominent summary for rolling z-score (visible without expanding) ─
+            if is_rolling and a.get("explanation"):
+                st.info(
+                    f"**{a['date']} · {a['description']} · "
+                    f"${abs(a['amount']):,.2f}**  \n{a['explanation']}"
+                )
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Z-Score",        f"{a['z_score']:.2f}σ")
+                col_b.metric("90-day Avg",     f"${a['rolling_mean']:,.2f}")
+                col_c.metric("90-day Std Dev", f"${a['rolling_std']:,.2f}")
+
+            # ── Detail expander (all anomalies) ──────────────────────────────────
             with st.expander(
                 f"⚠️ {a['date']} | {a['description']} | ${abs(a['amount']):,.2f}"
             ):
                 st.write(f"**Category:** {a['category']}")
-                st.write(f"**Reason:**   {a['reason']}")
                 st.write(f"**Method:**   {a['method'].replace('_', ' ').title()}")
+                if a.get("explanation"):
+                    st.info(a["explanation"])
+                else:
+                    st.write(f"**Reason:** {a['reason']}")
+                if a.get("z_score") is not None:
+                    col_a, col_b, col_c = st.columns(3)
+                    col_a.metric("Z-Score",        f"{a['z_score']:.2f}σ")
+                    col_b.metric("90-day Avg",     f"${a['rolling_mean']:,.2f}")
+                    col_c.metric("90-day Std Dev", f"${a['rolling_std']:,.2f}")
 
 # ── Tab 4: Transactions ───────────────────────────────────────────────────────
 with tab4:
@@ -176,6 +258,10 @@ with tab4:
     if df.empty:
         st.info("No transactions loaded.")
     else:
+        # Build correction lookup from verification_report
+        vr_report    = result.get("verification_report", {})
+        corr_map     = _build_correction_map(vr_report)
+
         col_f1, col_f2, col_f3 = st.columns(3)
         with col_f1:
             categories = ["All"] + sorted(df["category"].unique().tolist())
@@ -195,12 +281,47 @@ with tab4:
                 filtered["description"].str.contains(search_term, case=False, na=False)
             ]
 
+        # Add ⚠ badge column if any corrections exist
+        display_df = filtered.copy()
+        if corr_map:
+            display_df["Status"] = display_df.apply(
+                lambda row: "⚠ Corrected"
+                if (row.get("description", ""), str(row.get("date", ""))[:10]) in corr_map
+                else "",
+                axis=1,
+            )
+
+        fmt = {"amount": "${:,.2f}", "balance": "${:,.2f}"}
         st.dataframe(
-            filtered.style.format({
-                "amount":  "${:,.2f}",
-                "balance": "${:,.2f}",
-            }),
+            display_df.style.format(fmt, na_rep="—"),
             use_container_width=True,
             height=500,
         )
         st.caption(f"Showing {len(filtered)} of {len(df)} transactions")
+
+        # ── Auto-correction detail cards ──────────────────────────────────────
+        visible_corrected = [
+            corr_map[(row["description"], str(row["date"])[:10])]
+            for _, row in filtered.iterrows()
+            if (row.get("description", ""), str(row.get("date", ""))[:10]) in corr_map
+        ]
+        if visible_corrected:
+            st.markdown("---")
+            st.markdown(f"**Auto-Correction Details** ({len(visible_corrected)} in view)")
+            for c in visible_corrected:
+                label = (
+                    f"⚠ {c['date']} · {c['description']} — "
+                    f"{_humanize_reason(c['reason'])}"
+                )
+                with st.expander(label):
+                    st.markdown(
+                        f"**Reason:** {_humanize_reason(c['reason'])}"
+                    )
+                    for f in c.get("fields", []):
+                        orig  = f["original_value"]
+                        fixed = f["corrected_value"]
+                        st.markdown(
+                            f"**Field corrected:** `{f['field']}`  \n"
+                            f"Original &nbsp; → &nbsp; Corrected  \n"
+                            f"`{orig}` &nbsp;→&nbsp; `{fixed}`"
+                        )

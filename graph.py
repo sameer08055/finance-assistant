@@ -8,6 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from nodes.pii         import redact_pii
 from nodes.extractor   import extract_transactions
+from nodes.verifier    import verify_transactions
 from nodes.categorizer import categorize_transactions
 from nodes.analyzer    import (
     load_transactions_to_sql,
@@ -41,13 +42,14 @@ class FinanceState(TypedDict):
     question:        str
 
     # Pipeline outputs
-    redacted_text:   str
-    pii_findings:    list[dict]
-    transactions:    list[dict]
-    summary:         dict
-    anomalies:       list[dict]
-    relevant_txns:   list[dict]
-    answer:          str
+    redacted_text:       str
+    pii_findings:        list[dict]
+    transactions:        list[dict]
+    verification_report: dict
+    summary:             dict
+    anomalies:           list[dict]
+    relevant_txns:       list[dict]
+    answer:              str
 
     # Conversation memory
     chat_history:    Annotated[list, operator.add]
@@ -76,6 +78,23 @@ def node_extract(state: FinanceState) -> dict:
         return {
             "transactions": _sanitize(result["transactions"]),
             "stage":        "extracted",
+        }
+    except Exception as e:
+        return {"error": str(e), "stage": "error"}
+
+
+def node_verify(state: FinanceState) -> dict:
+    try:
+        result = verify_transactions(state["transactions"])
+        return {
+            "transactions":        _sanitize(result["transactions"]),
+            "verification_report": _sanitize({
+                "corrections_made": result["corrections_made"],
+                "failed_schema":    result["failed_schema"],
+                "failed_balance":   result["failed_balance"],
+                "corrections":      result["corrections"],
+            }),
+            "stage": "verified",
         }
     except Exception as e:
         return {"error": str(e), "stage": "error"}
@@ -155,6 +174,7 @@ def build_graph():
 
     graph.add_node("redact",      node_redact)
     graph.add_node("extract",     node_extract)
+    graph.add_node("verify",      node_verify)
     graph.add_node("categorize",  node_categorize)
     graph.add_node("analyze",     node_analyze)
     graph.add_node("vectorstore", node_vectorstore)
@@ -164,7 +184,8 @@ def build_graph():
 
     for src, dst in [
         ("redact",      "extract"),
-        ("extract",     "categorize"),
+        ("extract",     "verify"),
+        ("verify",      "categorize"),
         ("categorize",  "analyze"),
         ("analyze",     "vectorstore"),
         ("vectorstore", "recommend"),
@@ -192,18 +213,19 @@ def run_pipeline(
 ) -> FinanceState:
     config = {"configurable": {"thread_id": thread_id}}
     initial_state: FinanceState = {
-        "raw_text":      raw_text,
-        "question":      question,
-        "redacted_text": "",
-        "pii_findings":  [],
-        "transactions":  [],
-        "summary":       {},
-        "anomalies":     [],
-        "relevant_txns": [],
-        "answer":        "",
-        "chat_history":  [],
-        "error":         "",
-        "stage":         "start",
+        "raw_text":            raw_text,
+        "question":            question,
+        "redacted_text":       "",
+        "pii_findings":        [],
+        "transactions":        [],
+        "verification_report": {},
+        "summary":             {},
+        "anomalies":           [],
+        "relevant_txns":       [],
+        "answer":              "",
+        "chat_history":        [],
+        "error":               "",
+        "stage":               "start",
     }
     return finance_graph.invoke(initial_state, config=config)
 

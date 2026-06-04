@@ -41,6 +41,7 @@ def get_financial_summary() -> dict:
         "total_expenses": """
             SELECT COALESCE(SUM(ABS(amount)), 0) as value
             FROM transactions WHERE amount < 0
+              AND category != 'Income & Salary'
         """,
         "net_cashflow": """
             SELECT COALESCE(SUM(amount), 0) as value
@@ -52,10 +53,12 @@ def get_financial_summary() -> dict:
         "avg_expense": """
             SELECT COALESCE(AVG(ABS(amount)), 0) as value
             FROM transactions WHERE amount < 0
+              AND category != 'Income & Salary'
         """,
         "largest_expense": """
             SELECT COALESCE(MAX(ABS(amount)), 0) as value
             FROM transactions WHERE amount < 0
+              AND category != 'Income & Salary'
         """,
     }
 
@@ -90,10 +93,15 @@ def get_financial_summary() -> dict:
 
 
 # ── Anomaly Detection ─────────────────────────────────────────────────────────
-def detect_anomalies(df: pd.DataFrame, z_threshold: float = 2.5) -> list[dict]:
+def detect_anomalies(
+    df: pd.DataFrame,
+    z_threshold: float = 2.5,
+    window_days: int = 90,
+    min_window: int = 5,
+) -> list[dict]:
     """
     Flag anomalous transactions using two methods:
-      1. Z-score on expense amounts (per category)
+      1. Rolling 90-day z-score per category (requires ≥5 transactions in window)
       2. Duplicate detection (same description + amount within 3 days)
     """
     anomalies = []
@@ -102,48 +110,103 @@ def detect_anomalies(df: pd.DataFrame, z_threshold: float = 2.5) -> list[dict]:
     if expenses.empty:
         return anomalies
 
-    # -- Method 1: Z-score per category ---
-    for category, group in expenses.groupby("category"):
-        if len(group) < 3:
-            continue
-        amounts = group["amount"].abs()
-        mean, std = amounts.mean(), amounts.std()
-        if std == 0:
-            continue
-        z_scores = (amounts - mean) / std
-        flagged = group[z_scores > z_threshold]
-        for _, row in flagged.iterrows():
-            anomalies.append({
-                "date":        str(row["date"]),
-                "description": row["description"],
-                "amount":      row["amount"],
-                "category":    category,
-                "reason":      f"Unusually large for {category} "
-                               f"(z={z_scores[row.name]:.2f}, "
-                               f"avg=${mean:.2f})",
-                "method":      "z_score",
-            })
-
-    # -- Method 2: Near-duplicate transactions ---
     expenses["date"] = pd.to_datetime(expenses["date"], errors="coerce")
+
+    # -- Method 1: Rolling window z-score per category --
+    for category, group in expenses.groupby("category"):
+        group = group.sort_values("date").reset_index(drop=True)
+
+        for i in range(len(group)):
+            row            = group.iloc[i]
+            current_date   = row["date"]
+            current_amount = abs(row["amount"])
+
+            # Window: all prior transactions in this category within window_days
+            window_start = current_date - pd.Timedelta(days=window_days)
+            prior        = group.iloc[:i]
+            window       = prior[prior["date"] >= window_start]
+
+            if len(window) < min_window:
+                # Fallback: flag if amount > 2× category mean (need ≥2 transactions)
+                all_amounts = group["amount"].abs()
+                if len(all_amounts) >= 2:
+                    cat_mean = all_amounts.mean()
+                    if cat_mean > 0 and current_amount > 2 * cat_mean:
+                        explanation = (
+                            f"This ${current_amount:.2f} {category} charge is more than 2× "
+                            f"the category average of ${cat_mean:.2f} "
+                            f"(based on {len(all_amounts)} transactions)"
+                        )
+                        anomalies.append({
+                            "date":         current_date.strftime("%Y-%m-%d"),
+                            "description":  row["description"],
+                            "amount":       row["amount"],
+                            "category":     category,
+                            "reason":       explanation,
+                            "method":       "category_mean_fallback",
+                            "rolling_mean": round(cat_mean, 2),
+                            "rolling_std":  None,
+                            "z_score":      None,
+                            "window_days":  None,
+                            "explanation":  explanation,
+                        })
+                continue
+
+            win_amounts = window["amount"].abs()
+            mean = win_amounts.mean()
+            std  = win_amounts.std()
+
+            if std == 0:
+                continue
+
+            z = (current_amount - mean) / std
+
+            if z > z_threshold:
+                explanation = (
+                    f"This ${current_amount:.2f} {category} charge is {z:.1f}\u03c3 "
+                    f"above your {window_days}-day average of ${mean:.2f} "
+                    f"(std: ${std:.2f})"
+                )
+                anomalies.append({
+                    "date":         current_date.strftime("%Y-%m-%d"),
+                    "description":  row["description"],
+                    "amount":       row["amount"],
+                    "category":     category,
+                    "reason":       explanation,
+                    "method":       "rolling_z_score",
+                    "rolling_mean": round(mean, 2),
+                    "rolling_std":  round(std, 2),
+                    "z_score":      round(z, 2),
+                    "window_days":  window_days,
+                    "explanation":  explanation,
+                })
+
+    # -- Method 2: Near-duplicate transactions --
     expenses_sorted = expenses.sort_values(["description", "date"])
     for _, group in expenses_sorted.groupby("description"):
         if len(group) < 2:
             continue
         group = group.sort_values("date")
         for i in range(1, len(group)):
-            prev = group.iloc[i - 1]
-            curr = group.iloc[i]
+            prev       = group.iloc[i - 1]
+            curr       = group.iloc[i]
             days_apart = abs((curr["date"] - prev["date"]).days)
             if days_apart <= 3 and curr["amount"] == prev["amount"]:
                 anomalies.append({
-                    "date":        str(curr["date"]),
+                    "date":        curr["date"].strftime("%Y-%m-%d"),
                     "description": curr["description"],
                     "amount":      curr["amount"],
                     "category":    curr.get("category", "Other"),
                     "reason":      f"Possible duplicate — same amount "
                                    f"charged {days_apart} day(s) apart",
                     "method":      "duplicate",
+                    # Pad with None so callers can rely on these keys existing
+                    "rolling_mean": None,
+                    "rolling_std":  None,
+                    "z_score":      None,
+                    "window_days":  None,
+                    "explanation":  f"Possible duplicate — same amount "
+                                    f"charged {days_apart} day(s) apart",
                 })
 
     return anomalies
