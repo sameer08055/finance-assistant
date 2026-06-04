@@ -6,3 +6,6 @@ eval/baseline_results.json
 __pycache__/
 *.pyc
 .DS_Store
+other_transactions.log
+eval/corrections.log
+eval/baseline_results.json
