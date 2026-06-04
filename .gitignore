@@ -1,11 +1,8 @@
 .env
+*.pdf
+other_transactions.log
+eval/corrections.log
+eval/baseline_results.json
 __pycache__/
 *.pyc
-*.pyo
 .DS_Store
-faiss_index/
-/tmp/
-*.pdf
-.streamlit/
-venv/
-.venv/
