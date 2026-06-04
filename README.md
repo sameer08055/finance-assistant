@@ -9,12 +9,14 @@ A local, privacy-first personal finance assistant built with LangChain, LangGrap
 - **PDF Ingestion** — Upload any bank statement PDF via drag and drop
 - **PII Redaction** — Automatically redacts account numbers, SSNs, phone numbers, emails, and names using Regex + Presidio before any LLM sees your data
 - **Transaction Extraction** — LLM-powered extraction of dates, descriptions, amounts, and balances
+- **Self-Correcting Pipeline** — Extracted transactions are validated for schema, type, and balance consistency; failures are automatically re-extracted by the LLM and logged to `eval/corrections.log`
 - **Smart Categorization** — Automatically categorizes transactions into 16 spending categories
 - **SQL Analytics** — Accurate financial calculations (income, expenses, cashflow, averages) via SQLite
 - **Semantic Search** — FAISS + HuggingFace embeddings for natural language transaction search
-- **Anomaly Detection** — Flags unusual charges and duplicate transactions via z-score analysis
+- **Anomaly Detection** — Flags unusual charges via rolling 90-day z-score per category and duplicate detection (same description + amount within 3 days)
 - **Interactive Charts** — Plotly pie charts and bar charts for spending and monthly cashflow
 - **Conversational Memory** — Ask follow-up questions with full context via LangGraph MemorySaver
+- **Eval Framework** — Measures extraction accuracy, categorization F1, and anomaly detection performance against a golden dataset
 - **LangSmith Tracing** — Full pipeline observability out of the box
 
 ---
@@ -31,10 +33,13 @@ PII Redaction (Regex + Presidio)
 Transaction Extraction (Groq LLM)
 │
 ▼
+Verification + Self-Correction (schema, type, balance checks → LLM re-extraction)
+│
+▼
 Categorization (Groq LLM)
 │
 ▼
-SQL Analysis + Anomaly Detection (SQLite)
+SQL Analysis + Anomaly Detection (SQLite + rolling z-score)
 │
 ▼
 FAISS Vectorstore (HuggingFace Embeddings)
@@ -57,9 +62,16 @@ finance_assistant/
 ├── nodes/
 │   ├── pii.py                  # PII redaction pipeline
 │   ├── extractor.py            # Transaction extraction
+│   ├── verifier.py             # Schema validation + self-correcting re-extraction
 │   ├── categorizer.py          # Transaction categorization
-│   ├── analyzer.py             # SQL analytics + Plotly charts
+│   ├── analyzer.py             # SQL analytics, rolling z-score anomaly detection, Plotly charts
 │   └── recommender.py          # LLM financial advisor
+├── eval/
+│   ├── golden_dataset.json     # Labeled ground-truth transactions
+│   ├── metrics_runner.py       # Extraction, categorization, and anomaly eval runner
+│   ├── edge_case_test.py       # Edge case test suite
+│   ├── baseline_results.json   # Saved eval results
+│   └── corrections.log         # Log of LLM self-corrections
 ├── utils/
 │   ├── pdf_loader.py           # PDF text extraction
 │   └── vectorstore.py          # FAISS build + semantic search
@@ -118,6 +130,25 @@ python generate_test_statement.py
 ```
 
 Then upload `test_statement.pdf` via the Streamlit sidebar.
+
+---
+
+## Evaluation
+
+Run the eval framework against the golden dataset to measure pipeline quality:
+
+```bash
+# Full end-to-end eval (requires GROQ_API_KEY)
+python eval/metrics_runner.py --pipeline
+
+# Anomaly algorithm only (no API key needed)
+python eval/metrics_runner.py --algorithm
+
+# Both
+python eval/metrics_runner.py --pipeline --algorithm
+```
+
+Metrics reported: extraction field-level recall/precision, categorization precision/recall/F1 per category (+ macro averages), and anomaly detection binary F1.
 
 ---
 
